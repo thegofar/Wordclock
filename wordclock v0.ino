@@ -13,23 +13,12 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-// Convert normal decimal numbers to binary coded decimal
-byte decToBcd(byte val)
-{
-  return( (val/10*16) + (val%10) );
-}
-// Convert binary coded decimal to normal decimal numbers
-byte bcdToDec(byte val)
-{
-  return( (val/16*10) + (val%16) );
-}
-
 //Library includes
 #include <FastLED.h>
 #include <Wire.h>
 #include <Time.h>
-#include <DS1307RTC.h>
-#include "default_layout.h"
+#include "DS3231.h" //jarzebski/Arduino-DS3231 
+#include "defaultLayout.h"
 
 
 //LED defines
@@ -38,12 +27,11 @@ byte bcdToDec(byte val)
 //PIN defines
 #define STRIP_DATA_PIN 6
 #define ARDUINO_LED 13 //Default Arduino LED
-#define TOUCH1 5
-#define TOUCH2 4
-#define RTC_ADDRESS 0x68
-#define LDR_PIN 7
+#define BOTTOMRIGHTTOUCH 5
+#define TOPRIGHTTOUCH 4
+#define LDR_PIN A03
 
-time_t time;
+DS3231 RTC;
 bool timeInSync = false;
 
 uint8_t strip[NUM_LEDS];
@@ -51,13 +39,9 @@ uint8_t stackptr = 0;
 
 CRGB leds[NUM_LEDS];
 
-uint8_t selectedLanguageMode = 0;
-const uint8_t RHEIN_RUHR_MODE = 0; //Define?
-const uint8_t WESSI_MODE = 1;
-
 boolean autoBrightnessEnabled = true;
 
-int displayMode = DIY1;
+int displayMode = 1;
 
 CRGB defaultColor = CRGB::White;
 uint8_t colorIndex = 0;
@@ -66,11 +50,10 @@ int testHours = 0;
 int testMinutes = 0;
 
 //multitasking helper
-const long tenSecondDelay = 10000;
 const long oneSecondDelay = 1000;
 const long halfSecondDelay = 500;
 
-long waitUntil1Sec = 0;
+long waituntilArduinoClock = 0;
 long waitUntilParty = 0;
 long waitUntilOff = 0;
 long waitUntilFastTest = 0;
@@ -81,9 +64,11 @@ long waitUntilLDR = 0;
 void fastTest();
 void clockLogic();
 void doLDRLogic();
+void doTouchSensorLogic();
 void makeParty();
 void off();
 void showHeart();
+void showTemperature();
 void pushToStrip(int ledId);
 void resetAndBlack();
 void resetStrip();
@@ -108,6 +93,8 @@ void setup() {
 	#endif
 	
 	pinMode(ARDUINO_LED, OUTPUT);
+	pinMode(BOTTOMRIGHTTOUCH, INPUT);
+	//pinMode(TOPRIGHTTOUCH, INPUT);
 	
 	//setup leds incl. fastled
 	for(int i = 0; i<NUM_LEDS; i++) {
@@ -119,37 +106,34 @@ void setup() {
 	
 	//setup rtc
 	Wire.begin();
-	DCF.Start();
+	RTC.begin();
 	setSyncInterval(3600); //every hour
-	setSyncProvider(getDCFTime);
-	DEBUG_PRINT("Waiting for DCF77 time ... ");
-	DEBUG_PRINT("It will take at least 2 minutes until a first update can be processed.");
+	setSyncProvider(getRTCTime);
+	DEBUG_PRINT("Waiting for DS3231 time ... ");
 	while(timeStatus()== timeNotSet) {
 		// wait until the time is set by the sync provider
 		DEBUG_PRINT(".");
 		delay(2000);
 	}
-	
-	//setup ir
-	irrecv.enableIRIn();
 }
 
 void loop() {
 	doLDRLogic();
+	doTouchSensorLogic();
 	switch(displayMode) {
-		case ONOFF:
+		case 0:
 			off();
 			break;
-		case DIY1:
+		case 1:
 			clockLogic();
 			break;
-		case DIY2:
+		case 2:
 			makeParty();
 			break;
-		case DIY3:
+		case 3:
 			showHeart();
 			break;
-		case DIY4:
+		case 4:
 			fastTest();
 			break;
 		default:
@@ -158,13 +142,15 @@ void loop() {
 	}
 }
 
-unsigned long getDCFTime() {
-	time_t DCFtime = DCF.getTime();
+unsigned long getRTCTime() 
+{
+	time_t RTCtime = RTC.getDateTime();
 	// Indicator that a time check is done
-	if (DCFtime!=0) {
+	if (RTCtime!=0) {
 		DEBUG_PRINT("sync");
 	}
-	return DCFtime;
+	return RTCtime;
+	//return dt.unixtime; possibly??
 }
 
 void doLDRLogic() {
@@ -179,39 +165,36 @@ void doLDRLogic() {
 	}
 }
 
+void doTouchSensorLogic()
+{
+	// uses the TTP223B capacitive touch sensor
+	int brtouch = digitalRead(BOTTOMRIGHTTOUCH);
+	//int trtouch = digitalRead(TOPRIGHTTOUCH);
+	
+	if(brtouch)
+	{
+		// cycle through the display modes
+		displayMode++;
+		if(displayMode>
+	}
+}
+
 ///////////////////////
 //DISPLAY MODES
 ///////////////////////
 void clockLogic() {
-	tmElements_t tm;
-	if(millis() >= wait10Sec) 
-	{
+	if(millis() >= waitUntilRtc) {
 		DEBUG_PRINT("doing clock logic");
-		wait10Sec = millis();
-		if(RTC.read(tm))
-		{
-			if(testMinutes != tm.Minute || testHours != tm.Hour) 
-			{
-				testMinutes = tm.Minute;
-				testHours = tm.Hour();
-				resetAndBlack();
-				timeToStrip(tm.Hour, tm.Minute);
-				displayStrip(defaultColor);
-			}
+		waitUntilRtc = millis();
+		if(testMinutes != minute() || testHours != hour()) {
+			testMinutes = minute();
+			testHours = hour();
+			resetAndBlack();
+			timeToStrip(testHours, testMinutes);
+			displayStrip(defaultColor);
 		}
-		else
-		{
-			if (RTC.chipPresent()) 
-			{
-				Serial.println("The DS1307 is stopped.  Please run the SetTime");
-				Serial.println("example to initialize the time and begin running.");
-				Serial.println();
-			} else 
-			{
-				Serial.println("DS1307 read error!  Please check the circuitry.");
-			}
-		}
-		wait10Sec += tenSecondDelay;
+		waitUntilRtc += oneSecondDelay;
+	}
 	}
 
 void off() {
@@ -258,6 +241,71 @@ void showHeart() {
 		waitUntilHeart += oneSecondDelay;
 	}
 }
+
+void showTemperature()
+{
+	int temp;
+	temp =(int) (RTC.readTemperature + 0.5);
+	
+	switch(temp)
+	{
+		case(14):
+			dispDIGI_FOURTEEN();
+			break;
+		case(15):
+			dispDIGI_FIFTEEN();
+			break;
+		case(16):
+			dispDIGI_SIXTEEN();
+			break;
+		case(17):
+			dispDIGI_SEVENTEEN();
+			break;
+		case(18):
+			dispDIGI_EIGHTEEN();
+			break;
+		case(19):
+			dispDIGI_NINETEEN();
+			break;
+		case(20):
+			dispDIGI_TWENTY();
+			break;
+		case(21):
+			dispDIGI_TWENTYONE();
+			break;
+		case(22):
+			dispDIGI_TWENTYTWO();
+			break;
+		case(23):
+			dispDIGI_TWENTYFOUR();
+			break;
+		case(24):
+			dispDIGI_TWENTYFIVE();
+			break;
+		case(25):
+			dispDIGI_TWENTYFIVE();
+			break;
+		case(26):
+			dispDIGI_TWENTYSIX();
+			break;
+		case(27):
+			dispDIGI_TWENTYSEVEN();
+			break;
+		case(28):
+			dispDIGI_TWENTYEIGHT();
+			break;
+		case(29):
+			dispDIGI_TWENTYNINE();
+			break;
+		case(30):
+			dispDIGI_THIRTY();
+			break;
+		case(default):
+			dispDIGI_THIRTYPLUS();
+			break;
+	}
+}
+	
 
 void fastTest() {
 	if(millis() >= waitUntilFastTest) {
@@ -362,91 +410,53 @@ void displayStrip(CRGB colorCode) {
 
 void timeToStrip(uint8_t hours,uint8_t minutes)
 {
-	pushES_IST();
+	pushITS();
 
 	//show minutes
-	if(minutes >= 5 && minutes < 10) {
-		pushFUENF1();
-		pushNACH();
-	} else if(minutes >= 10 && minutes < 15) {
-		pushZEHN1();
-		pushNACH();
-	} else if(minutes >= 15 && minutes < 20) {
-		pushVIERTEL();
-		pushNACH();
-	} else if(minutes >= 20 && minutes < 25) {
-		if(selectedLanguageMode == RHEIN_RUHR_MODE) {
-			pushZWANZIG();
-			pushNACH();
-		} else if(selectedLanguageMode == WESSI_MODE) {
-			pushZEHN1();
-			pushVOR();
-			pushHALB();
-		}
-	} else if(minutes >= 25 && minutes < 30) {
-		pushFUENF1();
-		pushVOR();
-		pushHALB();
-	} else if(minutes >= 30 && minutes < 35) {
-		pushHALB();
-	} else if(minutes >= 35 && minutes < 40) {
-		pushFUENF1();
-		pushNACH();
-		pushHALB();
-	} else if(minutes >= 40 && minutes < 45) {
-		if(selectedLanguageMode == RHEIN_RUHR_MODE) {
-			pushZWANZIG();
-			pushVOR();
-		} else if(selectedLanguageMode == WESSI_MODE) {
-			pushZEHN1();
-			pushNACH();
-			pushHALB();
-		}
-	} else if(minutes >= 45 && minutes < 50) {
-		pushVIERTEL();
-		pushVOR();
-	} else if(minutes >= 50 && minutes < 55) {
-		pushZEHN1();
-		pushVOR();
-	} else if(minutes >= 55 && minutes < 60) {
-		pushFUENF1();
-		pushVOR();
+	if(minutes >= 5-2 && minutes < 10-2) {
+		pushFIVE_MINS();
+		pushPAST();
+	} else if(minutes >= 10-2 && minutes < 15-2) {
+		pushTEN_MINS();
+		pushPAST();
+	} else if(minutes >= 15-2 && minutes < 20-2) {
+		pushQUARTER();
+		pushPAST();
+	} else if(minutes >= 20-2 && minutes < 25-2) {
+		pushTWENTY();
+		pushPAST();
+	} else if(minutes >= 25-2 && minutes < 30-2) {
+		pushTWENTY();
+		pushFIVE_MINS();
+		pushPAST();
+	} else if(minutes >= 30-2 && minutes < 35-2) {
+		pushHALF();
+		pushPAST();
+	} else if(minutes >= 35-2 && minutes < 40-2) {
+		pushTWENTY();
+		pushFIVE_MINS();
+		pushTO();
+	} else if(minutes >= 40-2 && minutes < 45-2) {
+		pushTWENTY();
+		pushTO();
+	} else if(minutes >= 45-2 && minutes < 50-2) {
+		pushQUARTER();
+		pushTO();
+	} else if(minutes >= 50-2 && minutes < 55-2) {
+		pushTEN_MINS();
+		pushTO();
+	} else if(minutes >= 55-2 && minutes < 60-2) {
+		pushFIVE_MINS();
+		pushTO();
 	}
 	
-	int singleMinutes = minutes % 5;
-	switch(singleMinutes) {
-		case 1:
-			pushONE();
-			break;
-		case 2:
-			pushONE();
-			pushTWO();
-			break;
-		case 3:
-			pushONE();
-			pushTWO();
-			pushTHREE();
-			break;
-		case 4:
-			pushONE();
-			pushTWO();
-			pushTHREE();
-			pushFOUR();
-		break;
-	}
 
 	if(hours >= 12) {
 		hours -= 12;
 	}
 
-	if(selectedLanguageMode == RHEIN_RUHR_MODE) {
-		if(minutes >= 25) {
-			hours++;
-		}
-	} else if(selectedLanguageMode == WESSI_MODE) {
-		if(minutes >= 20) {
-			hours++;
-		}
+	if(minutes >= 35-2) {
+		hours++;
 	}
 
 	if(hours == 12) {
@@ -456,226 +466,461 @@ void timeToStrip(uint8_t hours,uint8_t minutes)
 	//show hours
 	switch(hours) {
 		case 0:
-			pushZWOELF();
+			pushTWELVE();
 			break;
 		case 1:
-			if(minutes > 4) {
-				pushEINS(true);
-			} else {
-				pushEINS(false);
-			}
+			pushONE();
 			break;
 		case 2:
-			pushZWEI();
+			pushTWO();
 			break;
 		case 3:
-			pushDREI();
+			pushTHREE();
 			break;
 		case 4:
-			pushVIER();
+			pushFOUR();
 			break;
 		case 5:
-			pushFUENF2();
+			pushFIVE_HRS();
 			break;
 		case 6:
-			pushSECHS();
+			pushSIX();
 			break;
 		case 7:
-			pushSIEBEN();
+			pushSEVEN();
 			break;
 		case 8:
-			pushACHT();
+			pushEIGHT();
 			break;
 		case 9:
-			pushNEUN();
+			pushNINE();
 			break;
 		case 10:
-			pushZEHN();
+			pushTEN();
 			break;
 		case 11:
-			pushELF();
+			pushELEVEN();
 			break;
 	}
 	
-	//show uhr
-	if(minutes < 5) {
-		pushUHR();
+	//show o'clock
+	if((minutes >= 60-2)||(minutes < 5-2){
+		pushOCLOCK();
 	}
 }
 
 ///////////////////////
 //PUSH WORD HELPER
 ///////////////////////
-void pushES_IST()  {
-	pushToStrip(L9);
-	pushToStrip(L10);
-	pushToStrip(L30);
-	pushToStrip(L49);
-	pushToStrip(L50);
-}
-
-void pushFUENF1() {
-	pushToStrip(L70);
-	pushToStrip(L89);
-	pushToStrip(L90);
-	pushToStrip(L109);
-}
-
-void pushFUENF2() {
-	pushToStrip(L74);
-	pushToStrip(L85);
-	pushToStrip(L94);
+void pushITS()  {
 	pushToStrip(L105);
-}
-
-void pushNACH() {
-	pushToStrip(L73);
-	pushToStrip(L86);
-	pushToStrip(L93);
-	pushToStrip(L106);
-}
-
-void pushZEHN1() {
-	pushToStrip(L8);
-	pushToStrip(L11);
-	pushToStrip(L28);
-	pushToStrip(L31);
-}
-
-void pushVIERTEL() {
-	pushToStrip(L47);
-	pushToStrip(L52);
-	pushToStrip(L67);
-	pushToStrip(L72);
-	pushToStrip(L87);
-	pushToStrip(L92);
-	pushToStrip(L107);
-}
-
-void pushVOR() {
-	pushToStrip(L6);
-	pushToStrip(L13);
-	pushToStrip(L26);
-}
-
-void pushHALB() {
-	pushToStrip(L5);
-	pushToStrip(L14);
-	pushToStrip(L25);
-	pushToStrip(L34);
-}
-
-void pushONE() {
-	pushToStrip(L113);
-}
-
-void pushTWO() {
-	pushToStrip(L110);
-}
-
-void pushTHREE() {
-	pushToStrip(L111);
-}
-
-void pushFOUR() {
-	pushToStrip(L112);
-}
-
-void pushZWANZIG() {
-	pushToStrip(L48);
-	pushToStrip(L51);
-	pushToStrip(L68);
-	pushToStrip(L71);
-	pushToStrip(L88);
-	pushToStrip(L91);
-	pushToStrip(L108);
-}
-
-void pushZWOELF() {
-	pushToStrip(L61);
-	pushToStrip(L78);
-	pushToStrip(L81);
-	pushToStrip(L98);
-	pushToStrip(L101);
-}
-
-void pushEINS(bool s) {
-	pushToStrip(L4);
-	pushToStrip(L15);
-	pushToStrip(L24);
-	if(s) {
-		pushToStrip(L35);
-	}
-}
-
-void pushZWEI() {
-	pushToStrip(L75);
-	pushToStrip(L84);
-	pushToStrip(L95);
 	pushToStrip(L104);
-}
-
-void pushDREI() {
-	pushToStrip(L3);
-	pushToStrip(L16);
-	pushToStrip(L23);
-	pushToStrip(L36);
-}
-
-void pushVIER() {
-	pushToStrip(L76);
-	pushToStrip(L83);
-	pushToStrip(L96);
 	pushToStrip(L103);
 }
 
-void pushSECHS() {
-	pushToStrip(L2);
-	pushToStrip(L17);
-	pushToStrip(L22);
-	pushToStrip(L37);
-	pushToStrip(L42);
-}
-
-void pushSIEBEN() {
-	pushToStrip(L1);
-	pushToStrip(L18);
-	pushToStrip(L21);
-	pushToStrip(L38);
-	pushToStrip(L41);
-	pushToStrip(L58);
-}
-
-void pushACHT() {
-	pushToStrip(L77);
-	pushToStrip(L82);
-	pushToStrip(L97);
-	pushToStrip(L102);
-}
-
-void pushNEUN() {
-	pushToStrip(L39);
-	pushToStrip(L40);
-	pushToStrip(L59);
-	pushToStrip(L60);
-}
-
-void pushZEHN() {
-	pushToStrip(L0);
-	pushToStrip(L19);
-	pushToStrip(L20);
-	pushToStrip(L39);
-}
-
-void pushELF() {
-	pushToStrip(L54);
-	pushToStrip(L65);
-	pushToStrip(L74);
-}
-
-void pushUHR() {
+void pushFIVE_MINS() {
+	pushToStrip(L78);
+	pushToStrip(L79);
 	pushToStrip(L80);
-	pushToStrip(L99);
-	pushToStrip(L100);
+	pushToStrip(L81);
+}
+
+void pushTEN_MINS() {
+	pushToStrip(L71);
+	pushToStrip(L72);
+	pushToStrip(L73);
+}
+
+void pushQUARTER() {
+	pushToStrip(L90);
+	pushToStrip(L91);
+	pushToStrip(L92);
+	pushToStrip(L93);
+	pushToStrip(L94);
+	pushToStrip(L95);
+	pushToStrip(L96);
+}
+
+void pushTWENTY() {
+	pushToStrip(L87);
+	pushToStrip(L86);
+	pushToStrip(L85);
+	pushToStrip(L84);
+	pushToStrip(L83);
+	pushToStrip(L82);
+}
+
+void pushHALF() {
+	pushToStrip(L66);
+	pushToStrip(L67);
+	pushToStrip(L68);
+	pushToStrip(L69);
+}
+
+void pushPAST() {
+	pushToStrip(L62);
+	pushToStrip(L63);
+	pushToStrip(L64);
+	pushToStrip(L65);
+}
+
+void pushTO() {
+	pushToStrip(L75);
+	pushToStrip(L76);
+}
+
+// HOURS
+void pushONE() {
+	pushToStrip(L44);
+	pushToStrip(L45);
+	pushToStrip(L46);
+}
+
+void pushTWO() {
+	pushToStrip(L35);
+	pushToStrip(L34);
+	pushToStrip(L33);
+}
+
+void pushTHREE() {
+	pushToStrip(L50);
+	pushToStrip(L51);
+	pushToStrip(L52);
+	pushToStrip(L53);
+	pushToStrip(L54);
+}
+
+void pushFOUR() {
+	pushToStrip(L43);
+	pushToStrip(L42);
+	pushToStrip(L41);
+	pushToStrip(L40);
+}
+
+void pushFIVE_HRS() {
+	pushToStrip(L36);
+	pushToStrip(L37);
+	pushToStrip(L38);
+	pushToStrip(L39);
+}
+
+void pushSIX() {
+	pushToStrip(L47);
+	pushToStrip(L48);
+	pushToStrip(L49);
+}
+
+void pushSEVEN() {
+	pushToStrip(L21);
+	pushToStrip(L20);
+	pushToStrip(L19);
+	pushToStrip(L18);
+	pushToStrip(L17);
+}
+
+void pushEIGHT() {
+	pushToStrip(L22);
+	pushToStrip(L23);
+	pushToStrip(L24);
+	pushToStrip(L25);
+	pushToStrip(L26);
+}
+
+void pushNINE() {
+	pushToStrip(L58);
+	pushToStrip(L57);
+	pushToStrip(L56);
+	pushToStrip(L55);
+}
+
+void pushTEN_HRS() {
+	pushToStrip(L0);
+	pushToStrip(L1);
+	pushToStrip(L2);
+}
+
+void pushELEVEN() {
+	pushToStrip(L27);
+	pushToStrip(L28);
+	pushToStrip(L29);
+	pushToStrip(L30);
+	pushToStrip(L31);
+	pushToStrip(L32);
+}
+
+void pushTWELVE() {
+	pushToStrip(L16);
+	pushToStrip(L15);
+	pushToStrip(L14);
+	pushToStrip(L13);
+	pushToStrip(L12);
+	pushToStrip(L11);
+}
+
+void pushOCLOCK() {
+	pushToStrip(L5);
+	pushToStrip(L6);
+	pushToStrip(L7);
+	pushToStrip(L8);
+	pushToStrip(L9);
+	pushToStrip(L10);
 }
 ///////////////////////
+
+///////////////////////
+/* Digital Numerics */
+///////////////////////
+void pushDIGI_ONE()
+{
+	
+}
+void pushDIGI_TWO()
+{
+	
+}
+void pushDIGI_THREE()
+{
+	
+}
+void pushDIGI_FOUR()
+{
+	
+}
+void pushDIGI_FIVE()
+{
+	
+}
+void pushDIGI_SIX()
+{
+	
+}
+void pushDIGI_SEVEN()
+{
+	
+}
+void pushDIGI_EIGHT()
+{
+	
+}
+void pushDIGI_NINE()
+{
+	
+}
+void dispDIGI_TEN()
+{
+	pushTENS_ONE();
+	pushUNITS_ZERO();
+}
+void dispDIGI_ELEVEN()
+{
+	pushTENS_ONE();
+	pushUNITS_ONE();
+}
+void dispDIGI_TWELVE()
+{
+	pushTENS_ONE();
+	pushUNITS_TWO();
+}
+void dispDIGI_THIRTEEN()
+{
+	pushTENS_ONE();
+	pushUNITS_THREE();
+}
+void dispDIGI_FOURTEEN()
+{
+	pushTENS_ONE();
+	pushUNITS_FOUR();
+}
+void dispDIGI_FIFTEEN()
+{
+	pushTENS_ONE();
+	pushUNITS_FIVE();
+}
+void dispDIGI_SIXTEEN()
+{
+	pushTENS_ONE();
+	pushUNITS_SIX();
+}
+void dispDIGI_SEVENTEEN()
+{
+	pushTENS_ONE();
+	pushUNITS_SEVEN();
+}
+void dispDIGI_EIGHTEEN()
+{
+	pushTENS_ONE();
+	pushUNITS_EIGHT();
+}
+void dispDIGI_NINETEEN()
+{
+	pushTENS_ONE();
+	pushUNITS_NINE();
+}
+void dispDIGI_TWENTY()
+{
+	pushTENS_TWO();
+	pushUNITS_ZERO();
+}
+void dispDIGI_TWENTYONE()
+{
+	pushTENS_TWO();
+}
+void dispDIGI_TWENTYTWO()
+{
+	pushTENS_TWO();
+}
+void dispDIGI_TWENTYTHREE()
+{
+	pushTENS_TWO();
+}
+void dispDIGI_TWENTYFOUR()
+{
+	pushTENS_TWO();
+}
+void dispDIGI_TWENTYFIVE()
+{
+	pushTENS_TWO();
+}
+void dispDIGI_TWENTYSIX()
+{
+	pushTENS_TWO();
+}
+void dispDIGI_TWENTYSEVEN()
+{
+	pushTENS_TWO();
+}
+void dispDIGI_TWENTYEIGHT()
+{
+	pushTENS_TWO();
+}
+void dispDIGI_TWENTYNINE()
+{
+	pushTENS_TWO();
+}
+void dispDIGI_THIRTY()
+{
+	pushTENS_THREE();
+}
+void dispDIGI_THIRTYPLUS()
+{
+	pushTENS_THREE();
+	pushUNITS_PLUS();
+}
+void pushUNITS_ZERO()
+{
+	pushToStrip(L12);pushToStrip(L13);pushToStrip(L14);
+	pushToStrip(L32);pushToStrip(L28);
+	pushToStrip(L33);pushToStrip(L36);pushToStrip(L37);
+	pushToStrip(L50);pushToStrip(L52);pushToStrip(L54);
+	pushToStrip(L55);pushToStrip(L56);pushToStrip(L59);
+	pushToStrip(L72);pushToStrip(L76);
+	pushToStrip(L80);pushToStrip(L79);pushToStrip(L78);
+}
+void pushUNITS_ONE()
+{
+	pushToStrip(L11);pushToStrip(L12);pushToStrip(L13);pushToStrip(L14);pushToStrip(L15);
+	pushToStrip(L30);
+	pushToStrip(L35);
+	pushToStrip(L52);
+	pushToStrip(L57);pushToStrip(L59);
+	pushToStrip(L74); pushToStrip(L73);
+	pushToStrip(L79);
+}
+void pushUNITS_TWO()
+{
+	pushToStrip(L11);pushToStrip(L12);pushToStrip(L13);pushToStrip(L14);pushToStrip(L15);
+	pushToStrip(L29);
+	pushToStrip(L35);
+	pushToStrip(L53);
+	pushToStrip(L55);
+	pushToStrip(L76); pushToStrip(L72);
+	pushToStrip(L80); pushToStrip(L79);	pushToStrip(L78);
+}
+void pushUNITS_THREE()
+{
+	pushToStrip(L12);pushToStrip(L13);pushToStrip(L14);
+	pushToStrip(L32);pushToStrip(L28);
+	pushToStrip(L33);
+	pushToStrip(L53);pushToStrip(L52);
+	pushToStrip(L55);
+	pushToStrip(L76); pushToStrip(L72);
+	pushToStrip(L80); pushToStrip(L79);	pushToStrip(L78);
+}
+void pushUNITS_FOUR()
+{
+	pushToStrip(L12);
+	pushToStrip(L31);
+	pushToStrip(L33);pushToStrip(L34);pushToStrip(L35);pushToStrip(L36);pushToStrip(L37);
+	pushToStrip(L50);pushToStrip(L53);
+	pushToStrip(L58);pushToStrip(L56);
+	pushToStrip(L75);pushToStrip(L74);
+	pushToStrip(L78);
+}
+void pushUNITS_FIVE()
+{
+	pushToStrip(L77);pushToStrip(L78);pushToStrip(L79);pushToStrip(L80);pushToStrip(L81);
+	pushToStrip(L72);
+	pushToStrip(L59);pushToStrip(L58);pushToStrip(L57);pushToStrip(L56);
+	pushToStrip(L54);
+	pushToStrip(L33);
+	pushToStrip(L28);pushToStrip(L32);
+	pushToStrip(L14);pushToStrip(L13);pushToStrip(L12);
+}
+void pushUNITS_SIX()
+{
+	pushToStrip(L80);pushToStrip(L79);pushToStrip(L78);
+	pushToStrip(L72);pushToStrip(L76);
+	pushToStrip(L59);
+	pushToStrip(L53);pushToStrip(L52);pushToStrip(L51);pushToStrip(L50);
+	pushToStrip(L33);pushToStrip(L37);
+	pushToStrip(L28);pushToStrip(L32);
+	pushToStrip(L14);pushToStrip(L13);pushToStrip(L12);
+}
+void pushUNITS_SEVEN()
+{
+	pushToStrip(L77);pushToStrip(L78);pushToStrip(L79);pushToStrip(L80);pushToStrip(L81);
+	pushToStrip(L76);
+	pushToStrip(L56);
+	pushToStrip(L52);
+	pushToStrip(L36);
+	pushToStrip(L29);
+	pushToStrip(L14);
+}
+void pushUNITS_EIGHT()
+{
+	
+}
+void pushUNITS_NINE()
+{
+	
+}
+void pushTENS_ONE()
+{
+	pushToStrip(L17);pushToStrip(L18);pushToStrip(L19);pushToStrip(L20);pushToStrip(L21);
+	pushToStrip(L24);
+	pushToStrip(L41);
+	pushToStrip(L46);
+	pushToStrip(L63);pushToStrip(L65);
+	pushToStrip(L68); pushToStrip(L67);
+	pushToStrip(L85);
+}
+void pushTENS_TWO()
+{
+	pushToStrip(L17);pushToStrip(L18);pushToStrip(L19);pushToStrip(L20);pushToStrip(L21);
+	pushToStrip(L23);
+	pushToStrip(L41);
+	pushToStrip(L47);
+	pushToStrip(L61);
+	pushToStrip(L70); pushToStrip(L66);
+	pushToStrip(L86); pushToStrip(L85);	pushToStrip(L84);
+}
+void pushTENS_THREE()
+{
+	pushToStrip(L18);pushToStrip(L19);pushToStrip(L20);
+	pushToStrip(L26);pushToStrip(L22);
+	pushToStrip(L39);
+	pushToStrip(L47);pushToStrip(L46);
+	pushToStrip(L61);
+	pushToStrip(L70); pushToStrip(L66);
+	pushToStrip(L86); pushToStrip(L85);	pushToStrip(L84);
+}
