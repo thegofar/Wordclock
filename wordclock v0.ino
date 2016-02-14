@@ -18,8 +18,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <Wire.h>
 #include <Time.h>
 #include "DS3231.h" //jarzebski/Arduino-DS3231 
+#include "Timezone.h" //https://github.com/JChristensen/Timezone
 #include "defaultLayout.h"
-
 
 //LED defines
 #define NUM_LEDS 110
@@ -27,12 +27,19 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //PIN defines
 #define STRIP_DATA_PIN 6
 #define ARDUINO_LED 13 //Default Arduino LED
-#define BOTTOMRIGHTTOUCH 5
-#define TOPRIGHTTOUCH 4
-#define LDR_PIN A03
+#define BOTTOMRIGHTTOUCH 2
+#define LDR_PIN A3
 
+#define MAX_MODE 2  // off, clock, party, heart, fast, digi
+
+// The RTC was synched in GMT
 DS3231 RTC;
 bool timeInSync = false;
+TimeChangeRule myBST = {"BST", Last, Sun, Mar, 1, +60};
+TimeChangeRule mySTD = {"GMT", Last, Sun, Oct, 2, 0}; //GMT == UTC
+Timezone myTZ(myBST, mySTD);
+TimeChangeRule *tcr;        //pointer to the time change rule, use to get TZ abbrev
+time_t utc, local;
 
 uint8_t strip[NUM_LEDS];
 uint8_t stackptr = 0;
@@ -40,8 +47,8 @@ uint8_t stackptr = 0;
 CRGB leds[NUM_LEDS];
 
 boolean autoBrightnessEnabled = true;
-
-int displayMode = 1;
+int displayMode = 0;
+int cycleDisplayMode=0;
 
 CRGB defaultColor = CRGB::White;
 uint8_t colorIndex = 0;
@@ -51,24 +58,32 @@ int testMinutes = 0;
 
 //multitasking helper
 const long oneSecondDelay = 1000;
-const long halfSecondDelay = 500;
 
-long waituntilArduinoClock = 0;
 long waitUntilParty = 0;
 long waitUntilOff = 0;
 long waitUntilFastTest = 0;
 long waitUntilHeart = 0;
 long waitUntilLDR = 0;
+long waitUntilRtc = 0;
+long waitUntilTemp = 0;
+long waitUntilTouch = 0;
+long ledBlink = 0;
+long cycle_display = 0;
+int state = LOW;
 
+int digiNumber = 1;
+int temp=0;
 //forward declaration
 void fastTest();
 void clockLogic();
 void doLDRLogic();
 void doTouchSensorLogic();
 void makeParty();
-void off();
+void switchoffoff();
 void showHeart();
 void showTemperature();
+//void ThirtySecCountDown();
+void DigiNumberTest();
 void pushToStrip(int ledId);
 void resetAndBlack();
 void resetStrip();
@@ -78,7 +93,7 @@ void displayStrip(CRGB colorCode);
 void timeToStrip(uint8_t hours,uint8_t minutes);
 
 
-//#define DEBUG
+//#define DEBUG 1
 
 #ifdef DEBUG
 	#define DEBUG_PRINT(str)  Serial.println (str)
@@ -110,6 +125,9 @@ void setup() {
 	setSyncInterval(3600); //every hour
 	setSyncProvider(getRTCTime);
 	DEBUG_PRINT("Waiting for DS3231 time ... ");
+	digitalWrite(13,HIGH);
+	delay(3000);
+	digitalWrite(13,LOW);
 	while(timeStatus()== timeNotSet) {
 		// wait until the time is set by the sync provider
 		DEBUG_PRINT(".");
@@ -120,44 +138,74 @@ void setup() {
 void loop() {
 	doLDRLogic();
 	doTouchSensorLogic();
-	switch(displayMode) {
+	runDisplayModeLogic(displayMode);
+}
+
+time_t getRTCTime() 
+{
+	RTCDateTime RTCtime = RTC.getDateTime();
+	// Indicator that a time check is done
+	if (RTCtime.year!=0) {
+		DEBUG_PRINT("sync");
+	}
+
+	return RTCtime.unixtime+3600;
+}
+
+void runDisplayModeLogic(int disp_mode)
+{
+	switch(disp_mode) {
 		case 0:
-			off();
-			break;
-		case 1:
 			clockLogic();
 			break;
+		case 1:
+			cycleMode();
+			break;
 		case 2:
-			makeParty();
+			showTemperature();
 			break;
 		case 3:
-			showHeart();
+			makeParty();
 			break;
 		case 4:
 			fastTest();
 			break;
+		case 5:
+			DigiNumberTest();                       
 		default:
 			clockLogic();
 			break;
 	}
 }
 
-unsigned long getRTCTime() 
+void cycleMode()
 {
-	time_t RTCtime = RTC.getDateTime();
-	// Indicator that a time check is done
-	if (RTCtime!=0) {
-		DEBUG_PRINT("sync");
+	if(millis()>cycle_display)
+	{
+        resetAndBlack();
+		if(cycleDisplayMode == 5)
+		{
+			cycleDisplayMode = 0;
+		}
+		else
+		{
+			cycleDisplayMode++;
+		}
+		if(cycleDisplayMode=1)
+		{
+			// skip cycle display mode, as we are in that mode!
+			cycleDisplayMode = 2;
+		}
+		runDisplayModeLogic(cycleDisplayMode);
+		cycle_display+=15000;
 	}
-	return RTCtime;
-	//return dt.unixtime; possibly??
 }
 
 void doLDRLogic() {
 	if(millis() >= waitUntilLDR && autoBrightnessEnabled) {
 		DEBUG_PRINT("doing LDR logic");
 		waitUntilLDR = millis();
-		int ldrVal = map(analogRead(LDR_PIN), 0, 1023, 0, 150);
+		int ldrVal = map(analogRead(LDR_PIN), 300, 1023, 150, 0);
 		FastLED.setBrightness(255-ldrVal);
 		FastLED.show();
 		DEBUG_PRINT(ldrVal);
@@ -167,15 +215,27 @@ void doLDRLogic() {
 
 void doTouchSensorLogic()
 {
-	// uses the TTP223B capacitive touch sensor
-	int brtouch = digitalRead(BOTTOMRIGHTTOUCH);
-	//int trtouch = digitalRead(TOPRIGHTTOUCH);
-	
-	if(brtouch)
+	if(millis() >=waitUntilTouch)
 	{
-		// cycle through the display modes
-		displayMode++;
-		if(displayMode>
+		// uses the TTP223B capacitive touch sensor
+		int brtouch = digitalRead(BOTTOMRIGHTTOUCH);
+		//int trtouch = digitalRead(TOPRIGHTTOUCH);
+		
+		if(brtouch==HIGH)
+		{
+			waitUntilTouch=+500;
+			// cycle through the display modes
+			if(displayMode==MAX_MODE)
+			{
+				displayMode = 0;
+			}
+			else
+			{
+				displayMode++;
+			}
+			DEBUG_PRINT("changing mode to " + displayMode);
+		}
+		waitUntilTouch +=250;
 	}
 }
 
@@ -186,24 +246,27 @@ void clockLogic() {
 	if(millis() >= waitUntilRtc) {
 		DEBUG_PRINT("doing clock logic");
 		waitUntilRtc = millis();
-		if(testMinutes != minute() || testHours != hour()) {
-			testMinutes = minute();
-			testHours = hour();
+		utc = now();
+		local = myTZ.toLocal(utc, &tcr);
+		if(testMinutes != minute(local) || testHours != hour(local)) {
+			DEBUG_PRINT(testHours + " " + testMinutes);
+			testMinutes = minute(local);
+			testHours = hour(local);
 			resetAndBlack();
 			timeToStrip(testHours, testMinutes);
 			displayStrip(defaultColor);
 		}
 		waitUntilRtc += oneSecondDelay;
 	}
-	}
+}
 
-void off() {
+void switchoffoff() {
 	if(millis() >= waitUntilOff) {
 		DEBUG_PRINT("switching off");
 		waitUntilOff = millis();
 		resetAndBlack();
 		displayStrip(CRGB::Black);
-		waitUntilOff += halfSecondDelay;
+		waitUntilOff += oneSecondDelay;
 	}
 }
 
@@ -217,7 +280,7 @@ void makeParty() {
 			leds[i] = CHSV(random(0, 255), 255, 255);
 		}
 		FastLED.show();
-		waitUntilParty += halfSecondDelay;
+		waitUntilParty += oneSecondDelay;
 	}
 }
 
@@ -244,68 +307,224 @@ void showHeart() {
 
 void showTemperature()
 {
-	int temp;
-	temp =(int) (RTC.readTemperature + 0.5);
-	
-	switch(temp)
-	{
-		case(14):
-			dispDIGI_FOURTEEN();
-			break;
-		case(15):
-			dispDIGI_FIFTEEN();
-			break;
-		case(16):
-			dispDIGI_SIXTEEN();
-			break;
-		case(17):
-			dispDIGI_SEVENTEEN();
-			break;
-		case(18):
-			dispDIGI_EIGHTEEN();
-			break;
-		case(19):
-			dispDIGI_NINETEEN();
-			break;
-		case(20):
-			dispDIGI_TWENTY();
-			break;
-		case(21):
-			dispDIGI_TWENTYONE();
-			break;
-		case(22):
-			dispDIGI_TWENTYTWO();
-			break;
-		case(23):
-			dispDIGI_TWENTYFOUR();
-			break;
-		case(24):
-			dispDIGI_TWENTYFIVE();
-			break;
-		case(25):
-			dispDIGI_TWENTYFIVE();
-			break;
-		case(26):
-			dispDIGI_TWENTYSIX();
-			break;
-		case(27):
-			dispDIGI_TWENTYSEVEN();
-			break;
-		case(28):
-			dispDIGI_TWENTYEIGHT();
-			break;
-		case(29):
-			dispDIGI_TWENTYNINE();
-			break;
-		case(30):
-			dispDIGI_THIRTY();
-			break;
-		case(default):
-			dispDIGI_THIRTYPLUS();
-			break;
+	if(millis() >= waitUntilTemp) {
+		autoBrightnessEnabled = false;
+		DEBUG_PRINT("showing temperature");
+		resetAndBlack();
+		int temp=(int) (RTC.readTemperature() + 0.5);
+		pushDEGREES_CENTIGRADE();
+		switch(temp)
+		{
+			case(14):
+				dispDIGI_FOURTEEN();
+				break;
+			case(15):
+				dispDIGI_FIFTEEN();
+				break;
+			case(16):
+				dispDIGI_SIXTEEN();
+				break;
+			case(17):
+				dispDIGI_SEVENTEEN();
+				break;
+			case(18):
+				dispDIGI_EIGHTEEN();
+				break;
+			case(19):
+				dispDIGI_NINETEEN();
+				break;
+			case(20):
+				dispDIGI_TWENTY();
+				break;
+			case(21):
+				dispDIGI_TWENTYONE();
+				break;
+			case(22):
+				dispDIGI_TWENTYTWO();
+				break;
+			case(23):
+				dispDIGI_TWENTYTHREE();
+				break;
+			case(24):
+				dispDIGI_TWENTYFOUR();
+				break;
+			case(25):
+				dispDIGI_TWENTYFIVE();
+				break;
+			case(26):
+				dispDIGI_TWENTYSIX();
+				break;
+			case(27):
+				dispDIGI_TWENTYSEVEN();
+				break;
+			case(28):
+				dispDIGI_TWENTYEIGHT();
+				break;
+			case(29):
+				dispDIGI_TWENTYNINE();
+				break;
+			case(30):
+				dispDIGI_THIRTY();
+				break;
+			case(31):
+				dispDIGI_THIRTYONE();
+				break;
+			case(32):
+				dispDIGI_THIRTYTWO();
+				break;
+			case(33):
+				dispDIGI_THIRTYTHREE();
+				break;
+			case(34):
+				dispDIGI_THIRTYFOUR();
+				break;
+			case(35):
+				dispDIGI_THIRTYFIVE();
+				break;
+			case(36):
+				dispDIGI_THIRTYSIX();
+				break;
+			case(37):
+				dispDIGI_THIRTYSEVEN();
+				break;
+			case(38):
+				dispDIGI_THIRTYEIGHT();
+				break;
+			case(39):
+				dispDIGI_THIRTYNINE();
+				break;
+			case(40):
+				dispDIGI_FORTY();
+				break;			
+			default:
+				dispDIGI_FORTY();
+				break;
+		}
+		displayStrip(CRGB::Red);
+		waitUntilTemp += oneSecondDelay;
 	}
 }
-	
+
+void DigiNumberTest()
+{
+	resetAndBlack();
+	switch(digiNumber)
+	{
+	case(1):
+	pushDIGI_ONE();
+	break;
+	case(2):
+	pushDIGI_TWO();
+	break;
+	case(3):
+	pushDIGI_THREE();
+	break;
+	case(4):
+	pushDIGI_FOUR();
+	break;
+	case(5):
+	pushDIGI_FIVE();
+	break;
+	case(6):
+	pushDIGI_SIX();
+	break;
+	case(7):
+	pushDIGI_SEVEN();
+	break;
+	case(8):
+	pushDIGI_EIGHT();
+	break;
+	case(9):
+	pushDIGI_NINE();
+	break;
+	case(10):	
+	dispDIGI_TEN();
+	break;
+	case(11):
+	dispDIGI_ELEVEN();
+	break;
+	case(12):
+	dispDIGI_TWELVE();
+	break;
+	case(13):
+	dispDIGI_THIRTEEN();
+	break;
+	case(14):
+	dispDIGI_FOURTEEN();
+	break;
+	case(15):
+	dispDIGI_FIFTEEN();
+	break;
+	case(16):
+	dispDIGI_SIXTEEN();
+	break;
+	case(17):
+	dispDIGI_SEVENTEEN();
+	break;
+	case(18):
+	dispDIGI_EIGHTEEN();
+	break;
+	case(19):
+	dispDIGI_NINETEEN();
+	break;
+	case(20):
+	dispDIGI_TWENTY();
+	break;
+	case(21):
+	dispDIGI_TWENTYONE();
+	break;
+	case(22):
+	dispDIGI_TWENTYTWO();
+	break;
+	case(23):
+	dispDIGI_TWENTYTHREE();
+	break;
+	/*dispDIGI_TWENTYFOUR();
+
+	dispDIGI_TWENTYFIVE();
+
+	dispDIGI_TWENTYSIX();
+
+	dispDIGI_TWENTYSEVEN();
+
+	dispDIGI_TWENTYEIGHT();
+
+	dispDIGI_TWENTYNINE();
+
+	dispDIGI_THIRTY();
+
+	dispDIGI_THIRTYONE();
+
+	dispDIGI_THIRTYTWO();
+
+	dispDIGI_THIRTYTHREE();
+
+	dispDIGI_THIRTYFOUR();
+
+	dispDIGI_THIRTYFIVE();
+
+	dispDIGI_THIRTYSIX();
+
+	dispDIGI_THIRTYSEVEN();
+
+	dispDIGI_THIRTYEIGHT();
+
+	dispDIGI_THIRTYNINE();*/
+	default:
+	dispDIGI_FORTY();
+	break;
+	}
+	displayStrip();
+	delay(500);
+	if(digiNumber == 20)
+	{
+		digiNumber = 1;
+	}
+	else
+	{
+		digiNumber++;
+	}
+}
 
 void fastTest() {
 	if(millis() >= waitUntilFastTest) {
@@ -504,7 +723,7 @@ void timeToStrip(uint8_t hours,uint8_t minutes)
 	}
 	
 	//show o'clock
-	if((minutes >= 60-2)||(minutes < 5-2){
+	if((minutes >= 60-2)||(minutes < 5-2)){
 		pushOCLOCK();
 	}
 }
@@ -633,6 +852,12 @@ void pushNINE() {
 	pushToStrip(L55);
 }
 
+void pushTEN() {
+	pushToStrip(L0);
+	pushToStrip(L1);
+	pushToStrip(L2);
+}
+
 void pushTEN_HRS() {
 	pushToStrip(L0);
 	pushToStrip(L1);
@@ -667,44 +892,102 @@ void pushOCLOCK() {
 }
 ///////////////////////
 
+void pushDEGREES_CENTIGRADE()
+{
+	pushToStrip(L99);
+}
 ///////////////////////
 /* Digital Numerics */
 ///////////////////////
 void pushDIGI_ONE()
 {
-	
+	pushToStrip(L17);pushToStrip(L16);pushToStrip(L15);
+	pushToStrip(L27);
+	pushToStrip(L38);
+	pushToStrip(L49);
+	pushToStrip(L60);
+	pushToStrip(L70);pushToStrip(L71);
+	pushToStrip(L82);
 }
 void pushDIGI_TWO()
 {
-	
+	pushToStrip(L18);pushToStrip(L17);pushToStrip(L16);pushToStrip(L15);pushToStrip(L14);
+	pushToStrip(L25);
+	pushToStrip(L39);
+	pushToStrip(L49);pushToStrip(L50);
+	pushToStrip(L58);
+	pushToStrip(L69);pushToStrip(L73);
+	pushToStrip(L83);pushToStrip(L82);pushToStrip(L81);
 }
 void pushDIGI_THREE()
 {
-	
+	pushToStrip(L17);pushToStrip(L16);pushToStrip(L15);
+	pushToStrip(L25);pushToStrip(L29);
+	pushToStrip(L36);
+	pushToStrip(L49);pushToStrip(L50);pushToStrip(L48);
+	pushToStrip(L58);
+	pushToStrip(L69);pushToStrip(L73);
+	pushToStrip(L83);pushToStrip(L82);pushToStrip(L81);
 }
 void pushDIGI_FOUR()
 {
-	
+	pushToStrip(L15);
+	pushToStrip(L28);
+	pushToStrip(L36);pushToStrip(L37);pushToStrip(L38);pushToStrip(L39);pushToStrip(L40);
+	pushToStrip(L47);pushToStrip(L50);
+	pushToStrip(L61);pushToStrip(L59);
+	pushToStrip(L71);pushToStrip(L72);
+	pushToStrip(L81);
 }
 void pushDIGI_FIVE()
 {
-	
+	pushToStrip(L17);pushToStrip(L16);pushToStrip(L15);
+	pushToStrip(L25);pushToStrip(L29);
+	pushToStrip(L36);
+	pushToStrip(L49);pushToStrip(L50);pushToStrip(L48);
+	pushToStrip(L58);
+	pushToStrip(L69);
+	pushToStrip(L84);pushToStrip(L83);pushToStrip(L82);pushToStrip(L81);pushToStrip(L80);
 }
 void pushDIGI_SIX()
 {
-	
+	pushToStrip(L17);pushToStrip(L16);pushToStrip(L15);
+	pushToStrip(L25);pushToStrip(L29);
+	pushToStrip(L36);pushToStrip(L40);
+	pushToStrip(L47);pushToStrip(L48);pushToStrip(L49);pushToStrip(L50);
+	pushToStrip(L62);
+	pushToStrip(L70);
+	pushToStrip(L81);pushToStrip(L82);
 }
 void pushDIGI_SEVEN()
 {
-	
+	pushToStrip(L17);
+	pushToStrip(L26);
+	pushToStrip(L39);
+	pushToStrip(L49);
+	pushToStrip(L59);
+	pushToStrip(L73);
+	pushToStrip(L84);pushToStrip(L83);pushToStrip(L82);pushToStrip(L81);pushToStrip(L80);
 }
 void pushDIGI_EIGHT()
 {
-	
+	pushToStrip(L81);pushToStrip(L82);pushToStrip(L83);	
+	pushToStrip(L69);pushToStrip(L73);
+	pushToStrip(L62);pushToStrip(L58);
+	pushToStrip(L48);pushToStrip(L49);pushToStrip(L50);
+	pushToStrip(L40);pushToStrip(L36);
+	pushToStrip(L25);pushToStrip(L29);
+	pushToStrip(L17);pushToStrip(L16);pushToStrip(L15);
 }
 void pushDIGI_NINE()
 {
-	
+	pushToStrip(L81);pushToStrip(L82);pushToStrip(L83);	
+	pushToStrip(L69);pushToStrip(L73);
+	pushToStrip(L62);pushToStrip(L58);
+	pushToStrip(L48);pushToStrip(L49);pushToStrip(L50);pushToStrip(L51);
+	pushToStrip(L36);
+	pushToStrip(L28);
+	pushToStrip(L17);pushToStrip(L16);
 }
 void dispDIGI_TEN()
 {
@@ -764,47 +1047,102 @@ void dispDIGI_TWENTY()
 void dispDIGI_TWENTYONE()
 {
 	pushTENS_TWO();
+	pushUNITS_ONE();
 }
 void dispDIGI_TWENTYTWO()
 {
 	pushTENS_TWO();
+	pushUNITS_TWO();
 }
 void dispDIGI_TWENTYTHREE()
 {
 	pushTENS_TWO();
+	pushUNITS_THREE();
 }
 void dispDIGI_TWENTYFOUR()
 {
 	pushTENS_TWO();
+	pushUNITS_FOUR();
 }
 void dispDIGI_TWENTYFIVE()
 {
 	pushTENS_TWO();
+	pushUNITS_FIVE();
 }
 void dispDIGI_TWENTYSIX()
 {
 	pushTENS_TWO();
+	pushUNITS_SIX();
 }
 void dispDIGI_TWENTYSEVEN()
 {
 	pushTENS_TWO();
+	pushUNITS_SEVEN();
 }
 void dispDIGI_TWENTYEIGHT()
 {
 	pushTENS_TWO();
+	pushUNITS_EIGHT();
 }
 void dispDIGI_TWENTYNINE()
 {
 	pushTENS_TWO();
+	pushUNITS_NINE();
 }
 void dispDIGI_THIRTY()
 {
 	pushTENS_THREE();
+    pushUNITS_ZERO();
 }
-void dispDIGI_THIRTYPLUS()
+void dispDIGI_THIRTYONE()
 {
 	pushTENS_THREE();
-	pushUNITS_PLUS();
+    pushUNITS_ONE();
+}
+void dispDIGI_THIRTYTWO()
+{
+	pushTENS_THREE();
+    pushUNITS_TWO();
+}
+void dispDIGI_THIRTYTHREE()
+{
+	pushTENS_THREE();
+    pushUNITS_THREE();
+}
+void dispDIGI_THIRTYFOUR()
+{
+	pushTENS_THREE();
+    pushUNITS_FOUR();
+}
+void dispDIGI_THIRTYFIVE()
+{
+	pushTENS_THREE();
+    pushUNITS_FIVE();
+}
+void dispDIGI_THIRTYSIX()
+{
+	pushTENS_THREE();
+    pushUNITS_SIX();
+}
+void dispDIGI_THIRTYSEVEN()
+{
+	pushTENS_THREE();
+    pushUNITS_SEVEN();
+}
+void dispDIGI_THIRTYEIGHT()
+{
+	pushTENS_THREE();
+    pushUNITS_EIGHT();
+}
+void dispDIGI_THIRTYNINE()
+{
+	pushTENS_THREE();
+    pushUNITS_NINE();
+}
+void dispDIGI_FORTY()
+{
+	pushTENS_FOUR();
+    pushUNITS_ZERO();
 }
 void pushUNITS_ZERO()
 {
@@ -888,11 +1226,23 @@ void pushUNITS_SEVEN()
 }
 void pushUNITS_EIGHT()
 {
-	
+	pushToStrip(L14);pushToStrip(L13);pushToStrip(L12);
+	pushToStrip(L28);pushToStrip(L32);
+	pushToStrip(L37);pushToStrip(L33);
+	pushToStrip(L51);pushToStrip(L52);pushToStrip(L53);
+	pushToStrip(L55);pushToStrip(L59);
+	pushToStrip(L72);pushToStrip(L76);
+	pushToStrip(L80);pushToStrip(L79);pushToStrip(L78);
 }
 void pushUNITS_NINE()
 {
-	
+	pushToStrip(L78);pushToStrip(L79);pushToStrip(L80);
+	pushToStrip(L76);pushToStrip(L72);
+	pushToStrip(L55);pushToStrip(L59);
+	pushToStrip(L51);pushToStrip(L52);pushToStrip(L53);pushToStrip(L54);
+	pushToStrip(L33);
+	pushToStrip(L31);
+	pushToStrip(L13);pushToStrip(L14);
 }
 void pushTENS_ONE()
 {
@@ -923,4 +1273,14 @@ void pushTENS_THREE()
 	pushToStrip(L61);
 	pushToStrip(L70); pushToStrip(L66);
 	pushToStrip(L86); pushToStrip(L85);	pushToStrip(L84);
+}
+void pushTENS_FOUR()
+{
+	pushToStrip(L18);
+	pushToStrip(L25);
+	pushToStrip(L39);pushToStrip(L40);pushToStrip(L41);pushToStrip(L42);pushToStrip(L43);
+	pushToStrip(L44);pushToStrip(L47);
+	pushToStrip(L62);pushToStrip(L64);
+	pushToStrip(L69); pushToStrip(L68);
+	pushToStrip(L84);
 }
