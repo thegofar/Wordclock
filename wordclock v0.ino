@@ -1,5 +1,5 @@
 /* 
-Adapted by C Barry 2015
+Adapted by C Barry 14/02/2015 23.00
 Original work credit to Markus Backes - https://backes-markus.de/blog/
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
