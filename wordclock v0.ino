@@ -17,7 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <FastLED.h>
 #include <Wire.h>
 #include <Time.h>
-#include "DS3231.h" //jarzebski/Arduino-DS3231 
+#include "DS3231.h" //https://github.com/jarzebski/Arduino-DS3231
 #include "Timezone.h" //https://github.com/JChristensen/Timezone
 #include "defaultLayout.h"
 
@@ -30,7 +30,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define BOTTOMRIGHTTOUCH 2
 #define LDR_PIN A3
 
-#define MAX_MODE 2  // off, clock, party, heart, fast, digi
+#define MAX_MODE 5  // off, clock, party, heart, fast, digi
 
 // The RTC was synched in GMT
 DS3231 RTC;
@@ -311,7 +311,7 @@ void showTemperature()
 		autoBrightnessEnabled = false;
 		DEBUG_PRINT("showing temperature");
 		resetAndBlack();
-		int temp=(int) (RTC.readTemperature() + 0.5);
+		int temp=(int) (RTC.readTemperature() + 0.5); //round up
 		pushDEGREES_CENTIGRADE();
 		switch(temp)
 		{
@@ -400,7 +400,20 @@ void showTemperature()
 				dispDIGI_FORTY();
 				break;
 		}
-		displayStrip(CRGB::Red);
+		if(temp<21)
+		{
+			// 20 or less °C is cold
+			displayStrip(CRGB::Blue);
+		}
+		if((temp>20)  && (temp < 23))
+		{
+			// 21 --> 22 is acceptable
+			displayStrip(CRGB::Green);
+		}
+		if((temp>22))
+		{
+			displayStrip(CRGB::Red);
+		}
 		waitUntilTemp += oneSecondDelay;
 	}
 }
