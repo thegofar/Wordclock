@@ -23,14 +23,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //LED defines
 #define NUM_LEDS 110
-
+#define NUM_ROWS 11
+#define NUM_COLS 10
 //PIN defines
 #define STRIP_DATA_PIN 6
 #define ARDUINO_LED 13 //Default Arduino LED
 #define BOTTOMRIGHTTOUCH 2
 #define LDR_PIN A3
-
-#define MAX_MODE 5  // off, clock, party, heart, fast, digi
 
 // The RTC was synched in GMT
 DS3231 RTC;
@@ -47,8 +46,7 @@ uint8_t stackptr = 0;
 CRGB leds[NUM_LEDS];
 
 boolean autoBrightnessEnabled = true;
-int displayMode = 0;
-int cycleDisplayMode=0;
+boolean modeChange = false;
 
 CRGB defaultColor = CRGB::White;
 uint8_t colorIndex = 0;
@@ -62,17 +60,34 @@ const long oneSecondDelay = 1000;
 long waitUntilParty = 0;
 long waitUntilOff = 0;
 long waitUntilFastTest = 0;
-long waitUntilHeart = 0;
+long waitUntilRow = 0;
 long waitUntilLDR = 0;
 long waitUntilRtc = 0;
 long waitUntilTemp = 0;
 long waitUntilTouch = 0;
+long waitStickMan = 0;
 long ledBlink = 0;
+long waituntilDigi = 0;
 long cycle_display = 0;
 int state = LOW;
 
+typedef enum  Mode{CLOCK, CYCLE, TEMPERATURE, PARTY, FAST_TEST, DIGI_NUMBER, ANIMATE, ROW_TST};
+// Overload the Mode++ operator
+Mode& operator++(Mode& orig)
+{
+  orig = static_cast<Mode>(orig + 1); // static_cast required because enum + int -> int
+  //!!!!!!!!!!!
+  // TODO : cope with overflow
+  //!!!!!!!!!!!
+  return orig;
+}
+Mode displayMode = CYCLE;
+Mode cycleDisplayMode=FAST_TEST;
+const Mode finalMode=ROW_TST;
+
 int digiNumber = 1;
 int temp=0;
+int stickManPos = 0;
 //forward declaration
 void fastTest();
 void clockLogic();
@@ -80,8 +95,11 @@ void doLDRLogic();
 void doTouchSensorLogic();
 void makeParty();
 void switchoffoff();
-void showHeart();
+void lightUpRow(int row);
 void showTemperature();
+void animateStickMan();
+void runDisplayModeLogic(Mode disp_mode);
+void showManPos1(); void showManPos2(); void showManPos3();
 //void ThirtySecCountDown();
 void DigiNumberTest();
 void pushToStrip(int ledId);
@@ -93,7 +111,7 @@ void displayStrip(CRGB colorCode);
 void timeToStrip(uint8_t hours,uint8_t minutes);
 
 
-//#define DEBUG 1
+#define DEBUG
 
 #ifdef DEBUG
 	#define DEBUG_PRINT(str)  Serial.println (str)
@@ -109,7 +127,6 @@ void setup() {
 	
 	pinMode(ARDUINO_LED, OUTPUT);
 	pinMode(BOTTOMRIGHTTOUCH, INPUT);
-	//pinMode(TOPRIGHTTOUCH, INPUT);
 	
 	//setup leds incl. fastled
 	for(int i = 0; i<NUM_LEDS; i++) {
@@ -126,7 +143,7 @@ void setup() {
 	setSyncProvider(getRTCTime);
 	DEBUG_PRINT("Waiting for DS3231 time ... ");
 	digitalWrite(13,HIGH);
-	delay(3000);
+	delay(7000);
 	digitalWrite(13,LOW);
 	while(timeStatus()== timeNotSet) {
 		// wait until the time is set by the sync provider
@@ -138,75 +155,119 @@ void setup() {
 void loop() {
 	doLDRLogic();
 	doTouchSensorLogic();
-	runDisplayModeLogic(displayMode);
-}
-
-time_t getRTCTime() 
-{
-	RTCDateTime RTCtime = RTC.getDateTime();
-	// Indicator that a time check is done
-	if (RTCtime.year!=0) {
-		DEBUG_PRINT("sync");
+	if(displayMode == CYCLE)
+	{
+		// special case as we want to cycle all other available display modes!
+		cycleMode();
 	}
-
-	return RTCtime.unixtime+3600;
-}
-
-void runDisplayModeLogic(int disp_mode)
-{
-	switch(disp_mode) {
-		case 0:
-			clockLogic();
-			break;
-		case 1:
-			cycleMode();
-			break;
-		case 2:
-			showTemperature();
-			break;
-		case 3:
-			makeParty();
-			break;
-		case 4:
-			fastTest();
-			break;
-		case 5:
-			DigiNumberTest();                       
-		default:
-			clockLogic();
-			break;
+	else
+	{
+		runDisplayModeLogic(displayMode);
 	}
 }
 
 void cycleMode()
 {
 	if(millis()>cycle_display)
-	{
+	{			
+		modeChange= true;
+		DEBUG_PRINT("cycle mode: Mode changed");
+		cycle_display = millis()+10000;
         resetAndBlack();
-		if(cycleDisplayMode == 5)
+		if(cycleDisplayMode == finalMode)
 		{
-			cycleDisplayMode = 0;
+			cycleDisplayMode = (Mode)0;
 		}
 		else
 		{
-			cycleDisplayMode++;
+			++cycleDisplayMode;
 		}
-		if(cycleDisplayMode=1)
+
+		if(cycleDisplayMode==CYCLE)
 		{
 			// skip cycle display mode, as we are in that mode!
-			cycleDisplayMode = 2;
+			DEBUG_PRINT("skipping cycle mode!");
+			++cycleDisplayMode;
 		}
-		runDisplayModeLogic(cycleDisplayMode);
-		cycle_display+=15000;
+	}
+	runDisplayModeLogic(cycleDisplayMode);
+}
+void runDisplayModeLogic(Mode disp_mode)
+{
+	if(modeChange)
+	{
+		switch(disp_mode)
+		{
+			DEBUG_PRINT("new mode " + disp_mode);
+			resetAndBlack();
+			modeChange = false;
+			case 0:
+				dispDIGI_TEN;
+				break;
+			case 1:
+				pushDIGI_ONE;
+				break;
+			case 2:
+				pushDIGI_TWO;
+				break;
+			case 3:
+				pushDIGI_THREE;
+				break;
+			case 4:
+				pushDIGI_FOUR;
+				break;
+			case 5:
+				pushDIGI_FIVE;
+				break;
+			case 6:
+				pushDIGI_SIX;
+				break;
+			case 7:
+				pushDIGI_SEVEN;
+				break;
+			default:
+				dispDIGI_THIRTEEN;
+				break;
+		}
+		displayStrip();
+		delay(700);
+	}
+	switch(disp_mode) {
+		case CLOCK:
+			clockLogic();
+			break;
+		case CYCLE:
+			dispDIGI_THIRTEEN(); //error code!
+			break;
+		case TEMPERATURE:
+			showTemperature();
+			break;
+		case PARTY:
+			makeParty();
+			break;
+		case FAST_TEST:
+			fastTest();
+			break;
+		case DIGI_NUMBER:
+			DigiNumberTest();   
+			break;
+		case ANIMATE:
+			animateStickMan();
+			break;
+		case ROW_TST:
+			lightUpRow(0); // light up the bottom row as that had some problems with colour consistency
+			break;
+		default:
+			clockLogic();
+			break;
 	}
 }
-
 void doLDRLogic() {
 	if(millis() >= waitUntilLDR && autoBrightnessEnabled) {
 		DEBUG_PRINT("doing LDR logic");
 		waitUntilLDR = millis();
 		int ldrVal = map(analogRead(LDR_PIN), 300, 1023, 150, 0);
-		FastLED.setBrightness(255-ldrVal);
+		FastLED.setBrightness(255-(ldrVal*2));
 		FastLED.show();
 		DEBUG_PRINT(ldrVal);
 		waitUntilLDR += oneSecondDelay;
@@ -220,22 +281,30 @@ void doTouchSensorLogic()
 		// uses the TTP223B capacitive touch sensor
 		int brtouch = digitalRead(BOTTOMRIGHTTOUCH);
 		//int trtouch = digitalRead(TOPRIGHTTOUCH);
-		
+		waitUntilTouch= millis()+150;
 		if(brtouch==HIGH)
 		{
-			waitUntilTouch=+500;
+			modeChange = true;
+			DEBUG_PRINT("touch: Mode changed");
+			digitalWrite(ARDUINO_LED, HIGH);
+			
 			// cycle through the display modes
-			if(displayMode==MAX_MODE)
+			if(displayMode==finalMode)
 			{
-				displayMode = 0;
+				displayMode = CLOCK;
 			}
 			else
 			{
-				displayMode++;
+				++displayMode;
 			}
 			DEBUG_PRINT("changing mode to " + displayMode);
+			delay(250); //block code execution to allow debounce
 		}
-		waitUntilTouch +=250;
+		else
+		{
+			digitalWrite(ARDUINO_LED, LOW);
+		}
+		
 	}
 }
 
@@ -284,31 +353,62 @@ void makeParty() {
 	}
 }
 
-void showHeart() {
-	if(millis() >= waitUntilHeart) {
+void lightUpRow(int row) 
+{
+	if(millis() >= waitUntilRow) {
 		autoBrightnessEnabled = false;
-		DEBUG_PRINT("showing heart");
-		waitUntilHeart = millis();
+		DEBUG_PRINT("lighting a row: " + row);
+		waitUntilRow = millis();
 		resetAndBlack();
-		pushToStrip(L29); pushToStrip(L30); pushToStrip(L70); pushToStrip(L89);
-		pushToStrip(L11); pushToStrip(L48); pushToStrip(L68); pushToStrip(L91);
-		pushToStrip(L7); pushToStrip(L52); pushToStrip(L107);
-		pushToStrip(L6); pushToStrip(L106);
-		pushToStrip(L5); pushToStrip(L105);
-		pushToStrip(L15); pushToStrip(L95);
-		pushToStrip(L23); pushToStrip(L83);
-		pushToStrip(L37); pushToStrip(L77);
-		pushToStrip(L41); pushToStrip(L61);
-		pushToStrip(L59);
-		displayStrip(CRGB::Red);
-		waitUntilHeart += oneSecondDelay;
+		int finalLed = (NUM_ROWS*row)+NUM_COLS;
+		for(int led = finalLed-NUM_COLS; led < finalLed+1; led++)
+		{
+			pushToStrip(led);
+		}
+		displayStrip(CRGB::White);
+		waitUntilRow += oneSecondDelay;
 	}
 }
+
+void animateStickMan()
+{
+	if(millis() > waitStickMan)
+	{
+		stickManPos++;
+		autoBrightnessEnabled = false;
+		DEBUG_PRINT("showing jumping man");
+		waitStickMan = millis();
+		resetAndBlack();
+		switch (stickManPos)
+		{
+		case 1:
+			DEBUG_PRINT("stick man pos 1");
+			showManPos1();
+			break;
+		case 2:
+			DEBUG_PRINT("stick man pos 2");
+			showManPos2();
+			break;
+		case 3:
+			DEBUG_PRINT("stick man pos 3");
+			showManPos3();
+			stickManPos = 0;
+			break;
+		default:
+			dispDIGI_THIRTEEN(); //err code!
+			displayStrip();
+			break;
+		}
+		waitStickMan +=700;
+	}
+}
+
 
 void showTemperature()
 {
 	if(millis() >= waitUntilTemp) {
 		autoBrightnessEnabled = false;
+		waitUntilTemp =millis();
 		DEBUG_PRINT("showing temperature");
 		resetAndBlack();
 		int temp=(int) (RTC.readTemperature() + 0.5); //round up
@@ -420,129 +520,103 @@ void showTemperature()
 
 void DigiNumberTest()
 {
-	resetAndBlack();
-	switch(digiNumber)
+	if(millis()> waituntilDigi)
 	{
-	case(1):
-	pushDIGI_ONE();
-	break;
-	case(2):
-	pushDIGI_TWO();
-	break;
-	case(3):
-	pushDIGI_THREE();
-	break;
-	case(4):
-	pushDIGI_FOUR();
-	break;
-	case(5):
-	pushDIGI_FIVE();
-	break;
-	case(6):
-	pushDIGI_SIX();
-	break;
-	case(7):
-	pushDIGI_SEVEN();
-	break;
-	case(8):
-	pushDIGI_EIGHT();
-	break;
-	case(9):
-	pushDIGI_NINE();
-	break;
-	case(10):	
-	dispDIGI_TEN();
-	break;
-	case(11):
-	dispDIGI_ELEVEN();
-	break;
-	case(12):
-	dispDIGI_TWELVE();
-	break;
-	case(13):
-	dispDIGI_THIRTEEN();
-	break;
-	case(14):
-	dispDIGI_FOURTEEN();
-	break;
-	case(15):
-	dispDIGI_FIFTEEN();
-	break;
-	case(16):
-	dispDIGI_SIXTEEN();
-	break;
-	case(17):
-	dispDIGI_SEVENTEEN();
-	break;
-	case(18):
-	dispDIGI_EIGHTEEN();
-	break;
-	case(19):
-	dispDIGI_NINETEEN();
-	break;
-	case(20):
-	dispDIGI_TWENTY();
-	break;
-	case(21):
-	dispDIGI_TWENTYONE();
-	break;
-	case(22):
-	dispDIGI_TWENTYTWO();
-	break;
-	case(23):
-	dispDIGI_TWENTYTHREE();
-	break;
-	/*dispDIGI_TWENTYFOUR();
-
-	dispDIGI_TWENTYFIVE();
-
-	dispDIGI_TWENTYSIX();
-
-	dispDIGI_TWENTYSEVEN();
-
-	dispDIGI_TWENTYEIGHT();
-
-	dispDIGI_TWENTYNINE();
-
-	dispDIGI_THIRTY();
-
-	dispDIGI_THIRTYONE();
-
-	dispDIGI_THIRTYTWO();
-
-	dispDIGI_THIRTYTHREE();
-
-	dispDIGI_THIRTYFOUR();
-
-	dispDIGI_THIRTYFIVE();
-
-	dispDIGI_THIRTYSIX();
-
-	dispDIGI_THIRTYSEVEN();
-
-	dispDIGI_THIRTYEIGHT();
-
-	dispDIGI_THIRTYNINE();*/
-	default:
-	dispDIGI_FORTY();
-	break;
-	}
-	displayStrip();
-	delay(500);
-	if(digiNumber == 20)
-	{
-		digiNumber = 1;
-	}
-	else
-	{
-		digiNumber++;
+		autoBrightnessEnabled = false;
+		resetAndBlack();
+		DEBUG_PRINT("Digi number test");
+		switch(digiNumber)
+		{
+		case(1):
+			pushDIGI_ONE();
+			break;
+		case(2):
+			pushDIGI_TWO();
+			break;
+		case(3):
+			pushDIGI_THREE();
+			break;
+		case(4):
+			pushDIGI_FOUR();
+			break;
+		case(5):
+			pushDIGI_FIVE();
+			break;
+		case(6):
+			pushDIGI_SIX();
+			break;
+		case(7):
+			pushDIGI_SEVEN();
+			break;
+		case(8):
+			pushDIGI_EIGHT();
+			break;
+		case(9):
+			pushDIGI_NINE();
+			break;
+		case(10):	
+			dispDIGI_TEN();
+			break;
+		case(11):
+			dispDIGI_ELEVEN();
+			break;
+		case(12):
+			dispDIGI_TWELVE();
+			break;
+		case(13):
+			dispDIGI_THIRTEEN();
+			break;
+		case(14):
+			dispDIGI_FOURTEEN();
+			break;
+		case(15):
+			dispDIGI_FIFTEEN();
+			break;
+		case(16):
+			dispDIGI_SIXTEEN();
+			break;
+		case(17):
+			dispDIGI_SEVENTEEN();
+			break;
+		case(18):
+			dispDIGI_EIGHTEEN();
+			break;
+		case(19):
+			dispDIGI_NINETEEN();
+			break;
+		case(20):
+			dispDIGI_TWENTY();
+			break;
+		case(21):
+			dispDIGI_TWENTYONE();
+			break;
+		case(22):
+			dispDIGI_TWENTYTWO();
+			break;
+		case(23):
+			dispDIGI_TWENTYTHREE();
+			break;
+		default:
+			dispDIGI_FORTY();
+			break;
+		}
+		displayStrip();
+		waituntilDigi = millis()+oneSecondDelay;
+		if(digiNumber == 20)
+		{
+			digiNumber = 1;
+		}
+		else
+		{
+			digiNumber++;
+		}
 	}
 }
 
 void fastTest() {
 	if(millis() >= waitUntilFastTest) {
 		autoBrightnessEnabled = false;
-		DEBUG_PRINT("showing heart");
+		DEBUG_PRINT("showing multicoloured fast test");
 		waitUntilFastTest = millis();
 		if(testMinutes >= 60) {
 			testMinutes = 0;
@@ -1297,3 +1371,75 @@ void pushTENS_FOUR()
 	pushToStrip(L69); pushToStrip(L68);
 	pushToStrip(L84);
 }
+void showManPos1()
+{
+	pushToStrip(L92);pushToStrip(L94);
+	displayStrip(CRGB::Red);
+	resetStrip();
+	pushToStrip(L105); pushToStrip(L104); pushToStrip(L103); 
+	pushToStrip(L93);  
+	pushToStrip(L86); pushToStrip(L83); pushToStrip(L82); pushToStrip(L81); pushToStrip(L78); 
+	pushToStrip(L68); pushToStrip(L71); pushToStrip(L74); 
+	pushToStrip(L62); pushToStrip(L61); pushToStrip(L60); pushToStrip(L59); pushToStrip(L58); 
+	pushToStrip(L49); 
+	pushToStrip(L38); 
+	pushToStrip(L26); pushToStrip(L28); 
+	pushToStrip(L18); pushToStrip(L14); 
+	displayStrip(CRGB::Yellow);
+	resetStrip();
+	pushToStrip(L1); pushToStrip(L2); pushToStrip(L8); pushToStrip(L9);
+	displayStrip(CRGB::Blue);
+}
+
+void showManPos2()
+{
+	pushToStrip(L92);pushToStrip(L94);
+	displayStrip(CRGB::Red);
+	resetStrip();
+	pushToStrip(L105); pushToStrip(L104); pushToStrip(L103); 
+	pushToStrip(L93); 
+	pushToStrip(L83); pushToStrip(L82); pushToStrip(L81); 
+	pushToStrip(L71); 
+	pushToStrip(L64); pushToStrip(L63); pushToStrip(L62); pushToStrip(L61); pushToStrip(L60); pushToStrip(L59); pushToStrip(L58); pushToStrip(L57); pushToStrip(L56); 
+	pushToStrip(L49); 
+	pushToStrip(L38); 
+	pushToStrip(L26); pushToStrip(L28); 
+	pushToStrip(L17); pushToStrip(L15); 
+	displayStrip(CRGB::Yellow);
+	resetStrip();
+	pushToStrip(L3); pushToStrip(L4); pushToStrip(L6); pushToStrip(L7); 
+	displayStrip(CRGB::Blue);
+}
+void showManPos3()
+{
+	pushToStrip(L92);pushToStrip(L94);
+	displayStrip(CRGB::Red);
+	resetStrip();
+	pushToStrip(L105); pushToStrip(L104); pushToStrip(L103); 
+	pushToStrip(L93);
+	pushToStrip(L83); pushToStrip(L82); pushToStrip(L81); 
+	pushToStrip(L71); 
+	pushToStrip(L62); pushToStrip(L61); pushToStrip(L60); pushToStrip(L59); pushToStrip(L58); 
+	pushToStrip(L46); pushToStrip(L49); pushToStrip(L52); 
+	pushToStrip(L42); pushToStrip(L38); pushToStrip(L34); 
+	pushToStrip(L26); pushToStrip(L28); 
+	pushToStrip(L18); pushToStrip(L14); 
+	displayStrip(CRGB::Yellow);
+	resetStrip();
+	pushToStrip(L1); pushToStrip(L2); pushToStrip(L8); pushToStrip(L9); 
+	displayStrip(CRGB::Blue);
+}
+
+time_t getRTCTime() 
+{
+	RTCDateTime RTCtime = RTC.getDateTime();
+	// Indicator that a time check is done
+	if (RTCtime.year!=0) {
+		DEBUG_PRINT("sync");
+	}
+
+	return RTCtime.unixtime+3600;
+}
+
+
+
