@@ -15,6 +15,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //Library includes
 #include <FastLED.h>
+#include <EEPROM.h>
 #include <Wire.h>
 #include <Time.h>
 #include "DS3231.h" //https://github.com/jarzebski/Arduino-DS3231
@@ -40,6 +41,14 @@ Timezone myTZ(myBST, mySTD);
 TimeChangeRule *tcr;        //pointer to the time change rule, use to get TZ abbrev
 time_t utc, local;
 
+// NVM variables for LDR
+int min_nvm;
+int min_latest;
+int max_nvm;
+int max_latest;
+const int min_address = 0;
+const int max_address = sizeof(int);
+
 uint8_t strip[NUM_LEDS];
 uint8_t stackptr = 0;
 
@@ -47,15 +56,20 @@ CRGB leds[NUM_LEDS];
 
 boolean autoBrightnessEnabled = true;
 boolean modeChange = false;
+boolean powerSave = true;
 
 CRGB defaultColor = CRGB::White;
 uint8_t colorIndex = 0;
 
 int testHours = 0;
 int testMinutes = 0;
+boolean displayNoon = false;
+int meas_temp = 0;
 
 //multitasking helper
 const long oneSecondDelay = 1000;
+const long powerSaveTimeOut = 7200000; //2hrs
+const long nvmWriteTimeOut = 300000; // 5 mins between writes
 
 long waitUntilParty = 0;
 long waitUntilOff = 0;
@@ -66,12 +80,22 @@ long waitUntilRtc = 0;
 long waitUntilTemp = 0;
 long waitUntilTouch = 0;
 long waitStickMan = 0;
+long waitOnNVMMinWrite = 0;
+long waitOnNVMMaxWrite = 0;
+long waitUntilDisplay = 0;
 long ledBlink = 0;
 long waituntilDigi = 0;
 long cycle_display = 0;
+long temperaturePeriodic = 0;
+long powerSaveTime=0;
 int state = LOW;
 
-typedef enum  Mode{CLOCK, CYCLE, TEMPERATURE, PARTY, FAST_TEST, DIGI_NUMBER, ANIMATE, ROW_TST};
+typedef enum  Mode{CLOCK,ANIMATE, CYCLE, TEMPERATURE, PARTY, FAST_TEST,DIGI_NUMBER,ROW_TST};
+
+const int brightness_low = 25;
+const int brightness_med = 125;
+const int brightness_high = 255;
+
 // Overload the Mode++ operator
 Mode& operator++(Mode& orig)
 {
@@ -81,18 +105,20 @@ Mode& operator++(Mode& orig)
   //!!!!!!!!!!!
   return orig;
 }
-Mode displayMode = CYCLE;
-Mode cycleDisplayMode=FAST_TEST;
-const Mode finalMode=ROW_TST;
+Mode displayMode = CLOCK;
+Mode cycleDisplayMode=ANIMATE;
+const Mode finalMode=PARTY;
 
 int digiNumber = 1;
 int temp=0;
 int stickManPos = 0;
+
 //forward declaration
 void fastTest();
 void clockLogic();
 void doLDRLogic();
 void doTouchSensorLogic();
+void writeToEEPROM(int address, int value, long &timeout);
 void makeParty();
 void switchoffoff();
 void lightUpRow(int row);
@@ -109,7 +135,7 @@ void displayStripRandomColor();
 void displayStrip();
 void displayStrip(CRGB colorCode);
 void timeToStrip(uint8_t hours,uint8_t minutes);
-
+void printTimeToSerial();
 
 #define DEBUG
 
@@ -119,8 +145,8 @@ void timeToStrip(uint8_t hours,uint8_t minutes);
 	#define DEBUG_PRINT(str)
 #endif
 
-void setup() {
-	
+void setup() 
+{
 	#ifdef DEBUG
 		Serial.begin(9600);
 	#endif
@@ -128,6 +154,15 @@ void setup() {
 	pinMode(ARDUINO_LED, OUTPUT);
 	pinMode(BOTTOMRIGHTTOUCH, INPUT);
 	
+	powerSaveTime=millis();
+	// fetch NVM stored LDR values
+	EEPROM.get(min_address, min_nvm);
+	EEPROM.get(max_address,max_nvm);
+	min_latest = min_nvm;
+	max_latest = max_nvm;
+	DEBUG_PRINT("min and max ldr values:");
+	DEBUG_PRINT(min_nvm);
+	DEBUG_PRINT(max_nvm);
 	//setup leds incl. fastled
 	for(int i = 0; i<NUM_LEDS; i++) {
 		strip[i] = 0;
@@ -142,6 +177,7 @@ void setup() {
 	setSyncInterval(3600); //every hour
 	setSyncProvider(getRTCTime);
 	DEBUG_PRINT("Waiting for DS3231 time ... ");
+	
 	digitalWrite(13,HIGH);
 	delay(7000);
 	digitalWrite(13,LOW);
@@ -150,19 +186,61 @@ void setup() {
 		DEBUG_PRINT(".");
 		delay(2000);
 	}
+	
+	printTimeToSerial();
 }
+
 
 void loop() {
 	doLDRLogic();
+	doDisplay();
 	doTouchSensorLogic();
-	if(displayMode == CYCLE)
+}
+
+void doDisplay()
+{
+	if(millis() > waitUntilDisplay)
 	{
-		// special case as we want to cycle all other available display modes!
-		cycleMode();
-	}
-	else
-	{
-		runDisplayModeLogic(displayMode);
+		waitUntilDisplay = millis()+oneSecondDelay;
+		if((testHours > 1) && (testHours <7) && (isAM()) && (powerSave))
+		{
+			DEBUG_PRINT("In power save mode, screen off");
+			//switch off between 2am and 6am
+			switchoffoff();
+		}
+		else
+		{
+			//not in power save mode
+			if((!powerSave) && (millis() > (powerSaveTime + powerSaveTimeOut)))
+			{
+				DEBUG_PRINT("Re-enabling power save mode");
+				powerSave = true;
+			}
+			// continue with normal display mode
+			if(displayMode == CYCLE)
+			{
+				// special case as we want to cycle all other available display modes!
+				cycleMode();
+			}
+			else
+			{
+				if((displayMode == CLOCK) && (millis() > temperaturePeriodic))
+				{
+					DEBUG_PRINT("Showing Temperature for 2.5 secs");
+					meas_temp = 254; //force a temperature redraw when switching modes.
+					temperaturePeriodic = 180000 + millis(); //3 minutes
+					runDisplayModeLogic(TEMPERATURE);
+					delay(2500);
+					runDisplayModeLogic(CLOCK);
+				}
+				else
+				{
+					DEBUG_PRINT("Executing: " + displayMode);
+					runDisplayModeLogic(displayMode);
+				}
+			}
+
+		}
 	}
 }
 
@@ -172,6 +250,7 @@ void cycleMode()
 	{			
 		modeChange= true;
 		DEBUG_PRINT("cycle mode: Mode changed");
+		meas_temp = 254; //force a temperature redraw when switching modes.
 		cycle_display = millis()+10000;
         resetAndBlack();
 		if(cycleDisplayMode == finalMode)
@@ -194,44 +273,6 @@ void cycleMode()
 }
 void runDisplayModeLogic(Mode disp_mode)
 {
-	if(modeChange)
-	{
-		switch(disp_mode)
-		{
-			DEBUG_PRINT("new mode " + disp_mode);
-			resetAndBlack();
-			modeChange = false;
-			case 0:
-				dispDIGI_TEN;
-				break;
-			case 1:
-				pushDIGI_ONE;
-				break;
-			case 2:
-				pushDIGI_TWO;
-				break;
-			case 3:
-				pushDIGI_THREE;
-				break;
-			case 4:
-				pushDIGI_FOUR;
-				break;
-			case 5:
-				pushDIGI_FIVE;
-				break;
-			case 6:
-				pushDIGI_SIX;
-				break;
-			case 7:
-				pushDIGI_SEVEN;
-				break;
-			default:
-				dispDIGI_THIRTEEN;
-				break;
-		}
-		displayStrip();
-		delay(700);
-	}
 	switch(disp_mode) {
 		case CLOCK:
 			clockLogic();
@@ -266,11 +307,22 @@ void doLDRLogic() {
 	if(millis() >= waitUntilLDR && autoBrightnessEnabled) {
 		DEBUG_PRINT("doing LDR logic");
 		waitUntilLDR = millis();
-		int ldrVal = map(analogRead(LDR_PIN), 300, 1023, 150, 0);
-		FastLED.setBrightness(255-(ldrVal*2));
+		
+		int ldrVal = map(analogRead(LDR_PIN), 90, 450, 220, 0);
+		FastLED.setBrightness(255-(ldrVal));
 		FastLED.show();
-		DEBUG_PRINT(ldrVal);
 		waitUntilLDR += oneSecondDelay;
+	}
+}
+
+void writeToEEPROM(int address, int value, long &timeout)
+{
+	// using this function limits the number of writes to EEPROM
+	if(millis() > timeout)
+	{
+		DEBUG_PRINT("writing to NVM");
+		EEPROM.put(address,value);
+		timeout = millis() + 300000;
 	}
 }
 
@@ -284,7 +336,10 @@ void doTouchSensorLogic()
 		waitUntilTouch= millis()+150;
 		if(brtouch==HIGH)
 		{
+			powerSave = false;
+			powerSaveTime = millis();
 			modeChange = true;
+			meas_temp = 254; //force a temperature redraw when switching modes.
 			DEBUG_PRINT("touch: Mode changed");
 			digitalWrite(ARDUINO_LED, HIGH);
 			
@@ -314,6 +369,8 @@ void doTouchSensorLogic()
 void clockLogic() {
 	if(millis() >= waitUntilRtc) {
 		DEBUG_PRINT("doing clock logic");
+		printTimeToSerial();
+		autoBrightnessEnabled = true;
 		waitUntilRtc = millis();
 		utc = now();
 		local = myTZ.toLocal(utc, &tcr);
@@ -409,110 +466,115 @@ void showTemperature()
 	if(millis() >= waitUntilTemp) {
 		autoBrightnessEnabled = false;
 		waitUntilTemp =millis();
-		DEBUG_PRINT("showing temperature");
 		resetAndBlack();
 		int temp=(int) (RTC.readTemperature() + 0.5); //round up
-		pushDEGREES_CENTIGRADE();
-		switch(temp)
+		if (temp != meas_temp)
 		{
-			case(14):
-				dispDIGI_FOURTEEN();
-				break;
-			case(15):
-				dispDIGI_FIFTEEN();
-				break;
-			case(16):
-				dispDIGI_SIXTEEN();
-				break;
-			case(17):
-				dispDIGI_SEVENTEEN();
-				break;
-			case(18):
-				dispDIGI_EIGHTEEN();
-				break;
-			case(19):
-				dispDIGI_NINETEEN();
-				break;
-			case(20):
-				dispDIGI_TWENTY();
-				break;
-			case(21):
-				dispDIGI_TWENTYONE();
-				break;
-			case(22):
-				dispDIGI_TWENTYTWO();
-				break;
-			case(23):
-				dispDIGI_TWENTYTHREE();
-				break;
-			case(24):
-				dispDIGI_TWENTYFOUR();
-				break;
-			case(25):
-				dispDIGI_TWENTYFIVE();
-				break;
-			case(26):
-				dispDIGI_TWENTYSIX();
-				break;
-			case(27):
-				dispDIGI_TWENTYSEVEN();
-				break;
-			case(28):
-				dispDIGI_TWENTYEIGHT();
-				break;
-			case(29):
-				dispDIGI_TWENTYNINE();
-				break;
-			case(30):
-				dispDIGI_THIRTY();
-				break;
-			case(31):
-				dispDIGI_THIRTYONE();
-				break;
-			case(32):
-				dispDIGI_THIRTYTWO();
-				break;
-			case(33):
-				dispDIGI_THIRTYTHREE();
-				break;
-			case(34):
-				dispDIGI_THIRTYFOUR();
-				break;
-			case(35):
-				dispDIGI_THIRTYFIVE();
-				break;
-			case(36):
-				dispDIGI_THIRTYSIX();
-				break;
-			case(37):
-				dispDIGI_THIRTYSEVEN();
-				break;
-			case(38):
-				dispDIGI_THIRTYEIGHT();
-				break;
-			case(39):
-				dispDIGI_THIRTYNINE();
-				break;
-			case(40):
-				dispDIGI_FORTY();
-				break;			
-			default:
-				dispDIGI_FORTY();
-				break;
-		}
-		if(temp<21)
-		{
-			// 20 or less °C is cold
-			displayStrip(CRGB::Blue);
-		}
-		if((temp>20)  && (temp < 23))
-		{
-			// 21 --> 22 is acceptable
-			displayStrip(CRGB::Green);
-		}
-		if((temp>22))
-		{
-			displayStrip(CRGB::Red);
+			meas_temp = temp;
+			DEBUG_PRINT("temperature =");
+			DEBUG_PRINT(temp);
+			pushDEGREES_CENTIGRADE();
+			switch(temp)
+			{
+				case(14):
+					dispDIGI_FOURTEEN();
+					break;
+				case(15):
+					dispDIGI_FIFTEEN();
+					break;
+				case(16):
+					dispDIGI_SIXTEEN();
+					break;
+				case(17):
+					dispDIGI_SEVENTEEN();
+					break;
+				case(18):
+					dispDIGI_EIGHTEEN();
+					break;
+				case(19):
+					dispDIGI_NINETEEN();
+					break;
+				case(20):
+					dispDIGI_TWENTY();
+					break;
+				case(21):
+					dispDIGI_TWENTYONE();
+					break;
+				case(22):
+					dispDIGI_TWENTYTWO();
+					break;
+				case(23):
+					dispDIGI_TWENTYTHREE();
+					break;
+				case(24):
+					dispDIGI_TWENTYFOUR();
+					break;
+				case(25):
+					dispDIGI_TWENTYFIVE();
+					break;
+				case(26):
+					dispDIGI_TWENTYSIX();
+					break;
+				case(27):
+					dispDIGI_TWENTYSEVEN();
+					break;
+				case(28):
+					dispDIGI_TWENTYEIGHT();
+					break;
+				case(29):
+					dispDIGI_TWENTYNINE();
+					break;
+				case(30):
+					dispDIGI_THIRTY();
+					break;
+				case(31):
+					dispDIGI_THIRTYONE();
+					break;
+				case(32):
+					dispDIGI_THIRTYTWO();
+					break;
+				case(33):
+					dispDIGI_THIRTYTHREE();
+					break;
+				case(34):
+					dispDIGI_THIRTYFOUR();
+					break;
+				case(35):
+					dispDIGI_THIRTYFIVE();
+					break;
+				case(36):
+					dispDIGI_THIRTYSIX();
+					break;
+				case(37):
+					dispDIGI_THIRTYSEVEN();
+					break;
+				case(38):
+					dispDIGI_THIRTYEIGHT();
+					break;
+				case(39):
+					dispDIGI_THIRTYNINE();
+					break;
+				case(40):
+					dispDIGI_FORTY();
+					break;			
+				default:
+					dispDIGI_FORTY();
+					break;
+			}
+			if(temp<21)
+			{
+				// 20 or less °C is cold
+				displayStrip(CRGB::Blue);
+			}
+			if((temp>20)  && (temp < 23))
+			{
+				// 21 --> 22 is acceptable
+				displayStrip(CRGB::Green);
+			}
+			if((temp>22))
+			{
+				displayStrip(CRGB::Red);
+			}
 		}
 		waitUntilTemp += oneSecondDelay;
 	}
@@ -765,14 +827,46 @@ void timeToStrip(uint8_t hours,uint8_t minutes)
 		hours++;
 	}
 
-	if(hours == 12) {
+	if((minutes >= 60-2)||(minutes < 5-2))
+	{
+		if(((hours == 11) && minutes >55) || (hours == 12))
+		{
+			pushNOON();
+			displayNoon = true;
+		}
+		else
+		{
+			// this is a normal 11 o'clock for example
+			displayNoon = false;
+		}
+	}
+	else
+	{
+		// we are nowhere near noon, dont display it!
+		displayNoon = false;
+	}
+	
+	if(hours == 12)
+	{
 		hours = 0;
 	}
 
+	//show o'clock
+	if((minutes >= 60-2)||(minutes < 5-2))
+	{
+		if(!displayNoon)
+		{			
+			pushOCLOCK();
+		}
+	}
+	
 	//show hours
 	switch(hours) {
 		case 0:
-			pushTWELVE();
+			if(!displayNoon)
+			{
+				pushTWELVE();
+			}
 			break;
 		case 1:
 			pushONE();
@@ -809,10 +903,7 @@ void timeToStrip(uint8_t hours,uint8_t minutes)
 			break;
 	}
 	
-	//show o'clock
-	if((minutes >= 60-2)||(minutes < 5-2)){
-		pushOCLOCK();
-	}
+
 }
 
 ///////////////////////
@@ -967,6 +1058,14 @@ void pushTWELVE() {
 	pushToStrip(L13);
 	pushToStrip(L12);
 	pushToStrip(L11);
+}
+
+void pushNOON()
+{
+	pushToStrip(L58);
+	pushToStrip(L59);
+	pushToStrip(L60);
+	pushToStrip(L61);
 }
 
 void pushOCLOCK() {
@@ -1430,6 +1529,29 @@ void showManPos3()
 	displayStrip(CRGB::Blue);
 }
 
+void printTimeToSerial()
+{
+	utc = now();
+	local = myTZ.toLocal(utc, &tcr);
+	Serial.print(weekday(local));
+	Serial.print(" ");
+	Serial.print(day());
+	Serial.print("/");
+	Serial.print(month());
+	Serial.print("/");
+	Serial.print(year());
+	Serial.print(" ");
+	Serial.print(hour(local));
+	Serial.print(":");
+	Serial.print(minute(local));
+	if(isAM())
+	{	Serial.print("AM");
+	}
+	else
+	{	Serial.print("PM");
+	}
+}
+
 time_t getRTCTime() 
 {
 	RTCDateTime RTCtime = RTC.getDateTime();
@@ -1438,7 +1560,7 @@ time_t getRTCTime()
 		DEBUG_PRINT("sync");
 	}
 
-	return RTCtime.unixtime+3600;
+	return RTCtime.unixtime+3686; //1hr ?? &86secs for setting lag...
 }
 
 
