@@ -2,6 +2,8 @@
 An overview of my wordclock project.  Displaying the time in words!<br />
 Mode selection via a capacitive touch sensor.  It currently does, time in words, dancing man!, ambient temperature, 'party' where all LEDs are lit with random colours, some debug modes which aren't called in the current build.
 
+Currently this launches into clock mode displaying the time in words and every 3 minutes displays the temperature for a few seconds.  It also switches the display off as a power save during the night time.
+
 The time is set at compile time in a seperate sketch 'setTime.ino' that writes to the RTC.  I then flash the main program 'wordclock v0.ino' onto the arduino to get the system running.<br />
 Components:<br />
 - Microcontroller - Arduino Pro Mini Atmega328, code has been adapted from Markus Backes - https://backes-markus.de/blog/ wordclock code.<br />
