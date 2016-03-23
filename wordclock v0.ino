@@ -308,8 +308,8 @@ void doLDRLogic() {
 		DEBUG_PRINT("doing LDR logic");
 		waitUntilLDR = millis();
 		
-		int ldrVal = map(analogRead(LDR_PIN), 90, 450, 220, 0);
-		FastLED.setBrightness(255-(ldrVal));
+		int ldrVal = map(analogRead(LDR_PIN), 45, 450, 220, 0);
+		FastLED.setBrightness(255-(min(220,ldrVal))); // prevent very low brightnesses...
 		FastLED.show();
 		waitUntilLDR += oneSecondDelay;
 	}
