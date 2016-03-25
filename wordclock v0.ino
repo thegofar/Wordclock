@@ -31,6 +31,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define ARDUINO_LED 13 //Default Arduino LED
 #define BOTTOMRIGHTTOUCH 2
 #define LDR_PIN A3
+#define TEMP_DISPLAY_DURATION 3500 //time spent with temp displaying
+#define TEMP_DISPLAY_PERIOD 60000 //show temp every x msec
 
 // The RTC was synched in GMT
 DS3231 RTC;
@@ -65,6 +67,7 @@ int testHours = 0;
 int testMinutes = 0;
 boolean displayNoon = false;
 int meas_temp = 0;
+boolean forceRedraw = false;
 
 //multitasking helper
 const long oneSecondDelay = 1000;
@@ -199,11 +202,15 @@ void loop() {
 
 void doDisplay()
 {
+	utc = now();
+	local = myTZ.toLocal(utc, &tcr);
+
 	if(millis() > waitUntilDisplay)
 	{
 		waitUntilDisplay = millis()+oneSecondDelay;
-		if((testHours > 1) && (testHours <7) && (isAM()) && (powerSave))
+		if((hour(local) > 1) && (hour(local) <7) && (isAM()) && (powerSave))
 		{
+			DEBUG_PRINT(hour(local));
 			DEBUG_PRINT("In power save mode, screen off");
 			//switch off between 2am and 6am
 			switchoffoff();
@@ -228,10 +235,12 @@ void doDisplay()
 				{
 					DEBUG_PRINT("Showing Temperature for 2.5 secs");
 					meas_temp = 254; //force a temperature redraw when switching modes.
-					temperaturePeriodic = 180000 + millis(); //3 minutes
+					temperaturePeriodic = TEMP_DISPLAY_PERIOD + millis(); //3 minutes
 					runDisplayModeLogic(TEMPERATURE);
-					delay(2500);
+					delay(TEMP_DISPLAY_DURATION);
+					forceRedraw = true;
 					runDisplayModeLogic(CLOCK);
+					forceRedraw = false;
 				}
 				else
 				{
@@ -308,7 +317,7 @@ void doLDRLogic() {
 		DEBUG_PRINT("doing LDR logic");
 		waitUntilLDR = millis();
 		
-		int ldrVal = map(analogRead(LDR_PIN), 45, 450, 220, 0);
+		int ldrVal = map(analogRead(LDR_PIN), 55, 450, 220, 0);
 		FastLED.setBrightness(255-(min(220,ldrVal))); // prevent very low brightnesses...
 		FastLED.show();
 		waitUntilLDR += oneSecondDelay;
@@ -374,7 +383,7 @@ void clockLogic() {
 		waitUntilRtc = millis();
 		utc = now();
 		local = myTZ.toLocal(utc, &tcr);
-		if(testMinutes != minute(local) || testHours != hour(local)) {
+		if(testMinutes != minute(local) || testHours != hour(local) || forceRedraw) {
 			DEBUG_PRINT(testHours + " " + testMinutes);
 			testMinutes = minute(local);
 			testHours = hour(local);
@@ -1535,11 +1544,11 @@ void printTimeToSerial()
 	local = myTZ.toLocal(utc, &tcr);
 	Serial.print(weekday(local));
 	Serial.print(" ");
-	Serial.print(day());
+	Serial.print(day(local));
 	Serial.print("/");
-	Serial.print(month());
+	Serial.print(month(local));
 	Serial.print("/");
-	Serial.print(year());
+	Serial.print(year(local));
 	Serial.print(" ");
 	Serial.print(hour(local));
 	Serial.print(":");
@@ -1560,7 +1569,7 @@ time_t getRTCTime()
 		DEBUG_PRINT("sync");
 	}
 
-	return RTCtime.unixtime+3686; //1hr ?? &86secs for setting lag...
+	return RTCtime.unixtime+3686+86400; //24hrs?? &86secs for setting lag...
 }
 
 
